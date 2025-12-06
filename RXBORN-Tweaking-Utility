@@ -232,15 +232,192 @@ function Optimize-NetworkBasic {
 }
 
 # 5) List & Manage Startup Apps (present choices & allow disable)
-function Manage-StartupItems { ... }  # unchanged for brevity
+function Manage-StartupItems {
+    $name = "Manage Startup Apps"
+    try {
+        $regStartup = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+        $commonStartup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+
+        $items = @()
+        if (Test-Path $regStartup) {
+            Get-ItemProperty $regStartup -ErrorAction SilentlyContinue | ForEach-Object {
+                $_.PSObject.Properties | Where-Object { $_.Name -notin @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider") } | ForEach-Object {
+                    $items += [PSCustomObject]@{ Name = $_.Name; Path = $_.Value; Location = "Registry" }
+                }
+            }
+        }
+        if (Test-Path $commonStartup) {
+            Get-ChildItem $commonStartup -File | ForEach-Object {
+                $items += [PSCustomObject]@{ Name = $_.Name; Path = $_.FullName; Location = "Startup Folder" }
+            }
+        }
+
+        if ($items.Count -eq 0) {
+            Write-Host "No startup items found."
+            Log "$name - no startup items found."
+            Notify-Finished $name
+            return
+        }
+
+        Write-Host "`nCurrent Startup Items:"
+        for ($i = 0; $i -lt $items.Count; $i++) {
+            Write-Host "[$i] $($items[$i].Name)  [$($items[$i].Location)]"
+        }
+        $choices = Read-Host "`nEnter numbers (comma-separated) to DISABLE, or 'all' to disable all, or press Enter to skip"
+        if ([string]::IsNullOrWhiteSpace($choices)) {
+            Log "$name - no changes made by user."
+            Notify-Finished $name
+            return
+        }
+        if ($choices.Trim().ToLower() -eq "all") {
+            $toDisable = 0..($items.Count-1)
+        } else {
+            $toDisable = $choices -split ',' | ForEach-Object { $t = $_.Trim(); if ($t -as [int] -ge 0) { $t -as [int] } } | Where-Object { $_ -lt $items.Count }
+        }
+        $backupFile = Join-Path $backupRoot "startup-items-backup-$(Get-Date -Format yyyyMMdd-HHmmss).json"
+        $items | ConvertTo-Json -Depth 3 | Out-File -FilePath $backupFile -Encoding UTF8
+        $restorePlan.backups += @{ type="startup"; file=$backupFile }
+
+        foreach ($idx in $toDisable) {
+            $item = $items[$idx]
+            if ($item.Location -eq "Registry") {
+                Log "Removing startup reg value: $($item.Name)"
+                Remove-ItemProperty -Path $regStartup -Name $item.Name -ErrorAction SilentlyContinue
+            } else {
+                Log "Disabling startup file: $($item.Path)"
+                $disabledFolder = Join-Path $backupRoot "disabled-startup-files"
+                if (-not (Test-Path $disabledFolder)) { New-Item -Path $disabledFolder -ItemType Directory -Force | Out-Null }
+                Move-Item -Path $item.Path -Destination (Join-Path $disabledFolder ($item.Name + "-" + (Get-Date -Format yyyyMMdd-HHmmss))) -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Notify-Finished $name
+    } catch {
+        Log "$name Error: $_"
+        Write-Warning "$name encountered an error."
+    }
+}
 
 # 6) Process Priority Helper: interactive tool to set priority of a running process (temporary)
-function Set-GameProcessPriority { ... }  # unchanged for brevity
+function Set-GameProcessPriority {
+    $name = "Set Process Priority (temporary)"
+    try {
+        $processes = Get-Process | Where-Object { $_.ProcessName -ne "Idle" -and $_.ProcessName -ne "System" } | Sort-Object ProcessName
+        if ($processes.Count -eq 0) {
+            Write-Host "No user processes found."
+            Log "$name - no processes found."
+            Notify-Finished $name
+            return
+        }
+        Write-Host "`nRunning processes:"
+        for ($i = 0; $i -lt $processes.Count; $i++) {
+            Write-Host "[$i] $($processes[$i].ProcessName) (PID: $($processes[$i].Id))"
+        }
+        $choice = Read-Host "`nEnter process number to set priority, or press Enter to skip"
+        if ([string]::IsNullOrWhiteSpace($choice)) {
+            Log "$name - no process selected."
+            Notify-Finished $name
+            return
+        }
+        $idx = $choice -as [int]
+        if ($idx -ge 0 -and $idx -lt $processes.Count) {
+            $proc = $processes[$idx]
+            Write-Host "`nPriority options: 1 - Normal, 2 - AboveNormal, 3 - High, 4 - Realtime (USE WITH CAUTION)"
+            $priChoice = Read-Host "Select priority (1-4)"
+            $priority = switch ($priChoice) {
+                "1" { "Normal" }
+                "2" { "AboveNormal" }
+                "3" { "High" }
+                "4" { "Realtime" }
+                default { "Normal" }
+            }
+            try {
+                $proc.PriorityClass = $priority
+                Log "Set priority of $($proc.ProcessName) (PID: $($proc.Id)) to $priority"
+                Write-Host "Priority set to $priority (reverts on reboot/process restart)"
+            } catch {
+                Log "Failed to set priority: $_"
+                Write-Warning "Could not set priority (access denied or process exited)."
+            }
+        }
+        Notify-Finished $name
+    } catch {
+        Log "$name Error: $_"
+        Write-Warning "$name encountered an error."
+    }
+}
 #endregion
 
 #region Apply All & Revert All
-function Apply-AllTweaks { ... }  # unchanged for brevity
-function Revert-AllTweaks { ... } # unchanged for brevity
+function Apply-AllTweaks {
+    Log "=== Applying All Tweaks ==="
+    $restorePlan.restorePointCreated = Create-RestorePoint
+    Clear-TempFiles
+    Disable-WindowsAnimations
+    Set-HighPerformancePowerPlan
+    Optimize-NetworkBasic
+    Manage-StartupItems
+    Log "=== All Tweaks Applied ==="
+    Write-Host "`n✔️ All tweaks applied." -ForegroundColor Green
+}
+
+function Revert-AllTweaks {
+    Log "=== Reverting All Tweaks ==="
+    Write-Host "Reverting changes... see log for details."
+    # Restore registry files
+    $regBackups = $restorePlan.backups | Where-Object { $_.type -eq "registry" }
+    foreach ($b in $regBackups) {
+        Log "Importing registry backup: $($b.file)"
+        reg import $b.file | Out-Null
+    }
+    # Restore registry values
+    $regVals = $restorePlan.backups | Where-Object { $_.type -eq "regvalue" }
+    foreach ($b in $regVals) {
+        $val = Get-Content $b.file -Raw
+        Log "Restoring registry value: $($b.path) -> $($b.name) = $val"
+        Set-ItemProperty -Path $b.path -Name $b.name -Value $val -Force -ErrorAction SilentlyContinue
+    }
+    # Restore files
+    $fileBackups = $restorePlan.backups | Where-Object { $_.type -eq "files" }
+    foreach ($b in $fileBackups) {
+        Log "Restoring folder: $($b.backup) -> $($b.original)"
+        if (Test-Path $b.original) { Remove-Item $b.original -Recurse -Force -ErrorAction SilentlyContinue }
+        Move-Item -Path $b.backup -Destination $b.original -Force -ErrorAction SilentlyContinue
+    }
+    # Re-enable services
+    $svcBackups = $restorePlan.backups | Where-Object { $_.type -eq "service" }
+    foreach ($b in $svcBackups) {
+        Log "Re-enabling service: $($b.name)"
+        Set-Service -Name $b.name -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name $b.name -ErrorAction SilentlyContinue
+    }
+    # Restore power plan
+    $pp = $restorePlan.backups | Where-Object { $_.type -eq "powerplan" }
+    if ($pp) {
+        Log "Restoring power plan GUID: $($pp.guid)"
+        powercfg /setactive $pp.guid | Out-Null
+    }
+    # Restore startup items
+    $su = $restorePlan.backups | Where-Object { $_.type -eq "startup" }
+    if ($su) {
+        $items = Get-Content $su.file -Raw | ConvertFrom-Json
+        foreach ($item in $items) {
+            if ($item.Location -eq "Registry") {
+                Log "Restoring startup reg value: $($item.Name)"
+                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $item.Name -Value $item.Path -Force -ErrorAction SilentlyContinue
+            } else {
+                $disabledFolder = Join-Path $backupRoot "disabled-startup-files"
+                $backedFile = Get-ChildItem $disabledFolder -Filter "$($item.Name)*" | Select-Object -First 1
+                if ($backedFile) {
+                    Log "Restoring startup file: $($item.Name)"
+                    Move-Item -Path $backedFile.FullName -Destination $item.Path -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+    # Restore point revert is not automated (user can do via System Restore GUI)
+    Log "=== Revert Finished ==="
+    Write-Host "`n✔️ Revert finished." -ForegroundColor Green
+}
 #endregion
 
 #region Interactive Menu
@@ -283,5 +460,10 @@ function Pause { Write-Host ""; Read-Host "Press Enter to continue..." }
 $restorePlan | ConvertTo-Json -Depth 10 | Out-File -FilePath $restorePlanFile -Encoding UTF8
 
 # Main loop
-while ($true) { Show-Menu }
+try {
+    while ($true) { Show-Menu }
+}
+catch {
+    Write-Host "`nFATAL ERROR: $_" -ForegroundColor Red
+}
 Read-Host "`nPress ENTER to close this window"
