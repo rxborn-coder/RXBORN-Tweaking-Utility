@@ -1,469 +1,182 @@
-<#
-.SYNOPSIS
-  Rxborn Tweaking Utility - Safe, reversible performance tweaks for Windows.
+@echo off
+::===========================================================================
+::  Rxborn Tweaking Utility  –  pure CMD / .bat edition
+::  Safe, reversible tweaks: restore point, temp clean, animations off,
+::  high-performance power plan, disable Delivery Optimisation, etc.
+::===========================================================================
+setlocal EnableExtensions EnableDelayedExpansion
+title Rxborn Tweaking Utility
 
-.DESCRIPTION
-  This script implements a set of safe tweaks intended to reduce input delay,
-  stabilize frame delivery, reduce system load, and clean junk files. It:
-    - Creates a System Restore Point (if possible)
-    - Backs up registry & file changes to a timestamped folder
-    - Offers individually-selectable tweaks
-    - Provides Apply All and Revert All options
-    - Logs actions and displays "✔️ Tweak Finished" after each tweak
+::-------------- mandatory admin check -------------------------------------
+fltmc >nul 2>nul || (
+   echo This script must be run as Administrator.
+   pause & exit /b 1
+)
 
-.NOTES
-  - Run as Administrator.
-  - Some tweaks require a reboot to take full effect.
-  - This script avoids unsafe/bannable manipulations and focuses on system-level,
-    reversible optimizations.
-#>
+::-------------- init folders / log ----------------------------------------
+set "SCR=%~dp0"
+set "TS=%DATE:~10,4%%DATE:~4,2%%DATE:~7,2%-%TIME:~0,2%%TIME:~3,2%%TIME:~6,2%"
+set "TS=%TS: =0%"
+set "BAK=%SCR%ZeroDelayBackup-%TS%"
+md "%BAK%" 2>nul
+set "LOG=%BAK%\tweak-log.txt"
+>>"%LOG%" echo === Rxborn Tweaking Utility started %DATE% %TIME% ===
 
-#region Helper & Environment Setup
-# Ensure running as admin
-function Ensure-Admin {
-    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
-    if (-not $isAdmin) {
-        Write-Error "This script must be run as Administrator. Right-click PowerShell and choose 'Run as Administrator'."
-        exit 1
-    }
-}
+::-------------- helper macros ---------------------------------------------
+set "LOG=>>\"%BAK%\"\tweak-log.txt echo"
+set "PAUSE=pause>nul|set/p =Press any key to continue... "
+set "OK=echo [✔] Done"
+type nul >"%TEMP%\~nx0_mark"
 
-Ensure-Admin
+::===========================================================================
+:MENU
+cls
+echo =============================================
+echo     Rxborn Tweaking Utility  –  CMD Edition
+echo =============================================
+echo [1] Create System Restore Point
+echo [2] Clean Temp ^& Cache
+echo [3] Disable Windows Animations
+echo [4] Set High-Performance Power Plan
+echo [5] Basic Network Tweaks  (flush DNS ^+ disable DoSvc)
+echo [8] APPLY  ALL  TWEAKS
+echo [9] REVERT ALL  TWEAKS
+echo [0] EXIT
+echo =============================================
+set /p CHOICE=Choose (0-9): || set CHOICE=0
+if "%CHOICE%"=="1" goto :RP
+if "%CHOICE%"=="2" goto :TEMP
+if "%CHOICE%"=="3" goto :ANIM
+if "%CHOICE%"=="4" goto :POWER
+if "%CHOICE%"=="5" goto :NET
+if "%CHOICE%"=="8" goto :APPLYALL
+if "%CHOICE%"=="9" goto :REVERTALL
+if "%CHOICE%"=="0" exit /b 0
+goto :MENU
 
-# Setup backup/log folder
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$timestamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
-$backupRoot = Join-Path -Path $scriptRoot -ChildPath "ZeroDelayBackup-$timestamp"
-New-Item -Path $backupRoot -ItemType Directory -Force | Out-Null
+::===========================================================================
+:RP
+echo Creating restore point...
+wmic.exe /Namespace:\\root\default Path SystemRestore Call CreateRestorePoint "Rxborn Backup %TS%", 100, 7 >nul 2>nul && (
+   %OK% & %LOG% Restore-point created
+) || (
+   echo [!] Could not create restore point (may be disabled). & %LOG% Restore-point failed
+)
+%PAUSE%
+goto :MENU
 
-$logFile = Join-Path $backupRoot "tweak-log.txt"
-function Log($msg) {
-    $time = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    "$time - $msg" | Tee-Object -FilePath $logFile -Append
-}
+::===========================================================================
+:TEMP
+echo Cleaning temp folders...
+for %%D in (
+   "%LOCALAPPDATA%\Temp"
+   "%WINDIR%\Temp"
+   "%LOCALAPPDATA%\D3DSCache"
+   "%LOCALAPPDATA%\NVIDIA Corporation\NV_Cache"
+) do (
+   if exist "%%~D" (
+      robocopy "%%~D" "%BAK%\empty" /MIR >nul 2>nul
+      rd /s /q "%%~D" 2>nul
+      md "%%~D" 2>nul
+      %LOG% Cleaned %%~D
+   )
+)
+%OK% & %LOG% Temp-clean finished
+%PAUSE%
+goto :MENU
 
-Log "Rxborn Tweaking Utility started."
+::===========================================================================
+:ANIM
+echo Disabling Windows animations...
+:: backup current value
+for /f "tokens=3" %%V in ('reg query "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting 2^>nul') do set "VFX=%%V"
+if defined VFX (echo %VFX%>"%BAK%\VisFXSetting.txt" & %LOG% Backed-up VisFX=%VFX%)
+:: set to 2 = best performance
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul
+:: notify shell
+rundll32 user32.dll,UpdatePerUserSystemParameters 1,True 2>nul
+%OK% & %LOG% Animations disabled
+%PAUSE%
+goto :MENU
 
-# Utility to show friendly finished message
-function Notify-Finished($name) {
-    Write-Host "✔️ $name - Tweak Finished"
-    Log "$name finished."
-}
-#endregion
+::===========================================================================
+:POWER
+echo Setting High-Performance power plan...
+:: backup current
+for /f "tokens=4" %%G in ('powercfg /getactivescheme') do set "OLDGUID=%%G"
+if defined OLDGUID (echo %OLDGUID%>"%BAK%\power-guid.txt" & %LOG% Backed-up power GUID=%OLDGUID%)
+:: look for built-in “High performance”
+for /f "tokens=4" %%H in ('powercfg /list ^| find /i "High performance"') do set "HPG=%%H"
+if defined HPG (
+   powercfg /setactive %HPG% & %OK% & %LOG% Activated built-in High-performance
+) else (
+   :: duplicate current and tweak
+   for /f "tokens=4" %%N in ('powercfg /duplicatescheme %OLDGUID%') do set "NG=%%N"
+   powercfg /setacvalueindex %NG% SUB_PROCESSOR PROCTHROTTLEMAX 100 >nul
+   powercfg /setdcvalueindex %NG% SUB_PROCESSOR PROCTHROTTLEMAX 100 >nul
+   powercfg /setactive %NG% & %OK% & %LOG% Created/activated custom High-performance
+)
+%PAUSE%
+goto :MENU
 
-#region Restore Point & Restore Helpers
-function Create-RestorePoint {
-    <#
-      Uses Checkpoint-Computer (PowerShell) to create a System Restore Point.
-      Requires: System Restore enabled and administrative privileges.
-    #>
-    try {
-        if (Get-Command -Name Checkpoint-Computer -ErrorAction SilentlyContinue) {
-            $desc = "Rxborn Tweaking Utility Backup - $timestamp"
-            Log "Attempting to create restore point: $desc"
-            Checkpoint-Computer -Description $desc -RestorePointType "APPLICATION" -ErrorAction Stop
-            Notify-Finished "Create Restore Point"
-            return $true
-        } else {
-            Log "Checkpoint-Computer not available on this system."
-            Write-Warning "System Restore API (Checkpoint-Computer) is not available on this Windows edition."
-            return $false
-        }
-    } catch {
-        Log "Failed to create restore point: $_"
-        Write-Warning "Failed to create restore point. See log: $logFile"
-        return $false
-    }
-}
+::===========================================================================
+:NET
+echo Flushing DNS...
+ipconfig /flushdns | find /v "Resolver" & %LOG% DNS flushed
+echo Stopping/Delivery Optimisation service...
+sc stop DoSvc >nul 2>n1
+sc config DoSvc start= disabled >nul 2>nul && (
+   %OK% & %LOG% DoSvc disabled
+) || (
+   echo [!] Could not disable DoSvc & %LOG% DoSvc disable failed
+)
+%PAUSE%
+goto :MENU
 
-# Export an automated "restore plan" file that lists backups (for Revert-All)
-$restorePlanFile = Join-Path $backupRoot "restore-plan.json"
-$restorePlan = [ordered]@{
-    timestamp = $timestamp
-    restorePointCreated = $false
-    backups = @()
-}
-#endregion
+::===========================================================================
+:APPLYALL
+echo.
+echo === Applying ALL tweaks ===
+%LOG% Apply-All started
+call :RP
+call :TEMP
+call :ANIM
+call :POWER
+call :NET
+echo.
+echo === All tweaks applied === & %LOG% Apply-All finished
+%PAUSE%
+goto :MENU
 
-#region Registry Backup Helper
-function Backup-RegistryKey($keyPath, $friendlyName) {
-    try {
-        $safeName = ($friendlyName -replace '[^A-Za-z0-9\-_.]', '_')
-        $outFile = Join-Path $backupRoot "$safeName-reg-$(Get-Date -Format yyyyMMdd-HHmmss).reg"
-        Log "Exporting registry key $keyPath -> $outFile"
-        reg export "$keyPath" "$outFile" /y | Out-Null
-        $restorePlan.backups += @{ type="registry"; path=$keyPath; file=$outFile }
-        return $outFile
-    } catch {
-        Log "Registry export failed for $keyPath : $_"
-        return $null
-    }
-}
-#endregion
-
-#region Tweak Implementation Functions
-
-# 1) Clear Temp Files (safe)
-function Clear-TempFiles {
-    $name = "Temp & Cache Cleanup"
-    try {
-        $paths = @(
-            "$env:LOCALAPPDATA\Temp",
-            "$env:TEMP",
-            "$env:WINDIR\Temp",
-            "$env:LOCALAPPDATA\D3DSCache",      # Direct3D Shader cache
-            "$env:LOCALAPPDATA\NVIDIA Corporation\NV_Cache" # NVIDIA GL cache (if exists)
-        ) | Where-Object { Test-Path $_ }
-
-        $backupFolder = Join-Path $backupRoot "files-temp-backup"
-        New-Item -Path $backupFolder -ItemType Directory -Force | Out-Null
-        foreach ($p in $paths) {
-            if (Test-Path $p) {
-                $targetBackup = Join-Path $backupFolder ((Split-Path $p -Leaf) + "-" + (Get-Date -Format yyyyMMdd-HHmmss))
-                # Move instead of Delete to allow revert
-                try {
-                    Log "Moving $p -> $targetBackup"
-                    Move-Item -Path $p -Destination $targetBackup -Force -ErrorAction Stop
-                    New-Item -ItemType Directory -Path $p -Force | Out-Null
-                    $restorePlan.backups += @{ type="files"; original=$p; backup=$targetBackup }
-                } catch {
-                    Log "Failed to move $p: $_"
-                }
-            }
-        }
-        Notify-Finished $name
-    } catch {
-        Log "Clear-TempFiles Error: $_"
-        Write-Warning "Clear-TempFiles encountered an error. Check log."
-    }
-}
-
-# 2) Disable Windows Animations (improves perceived input responsiveness)
-function Disable-WindowsAnimations {
-    $name = "Disable Windows Animations (Visual Effects -> Best Performance)"
-    try {
-        # Backup current setting
-        $regPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-        if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        $cur = Get-ItemProperty -Path $regPath -Name VisualFXSetting -ErrorAction SilentlyContinue
-        if ($cur) {
-            $backupFile = Join-Path $backupRoot "VisualFXSetting-$(Get-Date -Format yyyyMMdd-HHmmss).txt"
-            $cur.VisualFXSetting | Out-File -FilePath $backupFile
-            $restorePlan.backups += @{ type="regvalue"; path=$regPath; name="VisualFXSetting"; file=$backupFile }
-        }
-        # Set to 2 => "Adjust for best performance"
-        Set-ItemProperty -Path $regPath -Name VisualFXSetting -Value 2 -Force
-        # Force update of user parameters (refresh)
-        try {
-            rundll32.exe user32.dll,UpdatePerUserSystemParameters 1, True
-        } catch { }
-        Notify-Finished $name
-    } catch {
-        Log "Disable-WindowsAnimations Error: $_"
-        Write-Warning "Disable-WindowsAnimations encountered an error."
-    }
-}
-
-# 3) Set High Performance Power Plan
-function Set-HighPerformancePowerPlan {
-    $name = "Set High Performance Power Plan"
-    try {
-        # Backup currently active plan GUID
-        $curPlan = (powercfg /getactivescheme) 2>&1
-        $curGuid = ($curPlan -match '\: ([0-9a-fA-F\-]{36})' | Out-Null; $Matches[1])
-        if ($curGuid) {
-            $backupFile = Join-Path $backupRoot "powercfg-active-$curGuid.txt"
-            $curGuid | Out-File -FilePath $backupFile
-            $restorePlan.backups += @{ type="powerplan"; guid=$curGuid; file=$backupFile }
-        }
-        # Choose the "High performance" GUID if present; else duplicate current and modify
-        $schemes = powercfg /list
-        if ($schemes -match "High performance") {
-            $line = ($schemes -split "`n" | Where-Object { $_ -match "High performance" })[0]
-            if ($line -match '\: ([0-9a-fA-F\-]{36})') {
-                $guid = $Matches[1]
-                powercfg /setactive $guid | Out-Null
-                Notify-Finished $name
-                return
-            }
-        }
-        $newGuid = (powercfg -duplicatescheme $curGuid) 2>&1
-        $all = powercfg /list
-        $lastGuid = ($all -split "`n" | Select-String -Pattern "Power Scheme GUID" | Select-Object -Last 1).ToString()
-        if ($lastGuid -match '\: ([0-9a-fA-F\-]{36})') {
-            $nguid = $Matches[1]
-            powercfg /setacvalueindex $nguid SUB_PROCESSOR PROCTHROTTLEMAX 100 | Out-Null
-            powercfg /setdcvalueindex $nguid SUB_PROCESSOR PROCTHROTTLEMAX 100 | Out-Null
-            powercfg /setactive $nguid | Out-Null
-            Notify-Finished $name
-            return
-        }
-        Notify-Finished $name
-    } catch {
-        Log "Set-HighPerformancePowerPlan Error: $_"
-        Write-Warning "Set-HighPerformancePowerPlan encountered an error."
-    }
-}
-
-# 4) Basic Network Optimizations: flush DNS, disable Windows Update delivery optimization temporarily
-function Optimize-NetworkBasic {
-    $name = "Basic Network Optimizations (Flush DNS, pause Delivery Optimization)"
-    try {
-        ipconfig /flushdns | Out-Null
-        Log "Flushed DNS cache."
-
-        $svcName = "DoSvc"
-        if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
-            Backup-RegistryKey "HKLM\SYSTEM\CurrentControlSet\Services\$svcName" "Service-$svcName"
-            try {
-                Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-                Set-Service -Name $svcName -StartupType Disabled
-                Log "Stopped and disabled Delivery Optimization service."
-                $restorePlan.backups += @{ type="service"; name=$svcName; action="disabled" }
-            } catch {
-                Log "Unable to stop/disable $svcName: $_"
-            }
-        }
-
-        Notify-Finished $name
-    } catch {
-        Log "Optimize-NetworkBasic Error: $_"
-    }
-}
-
-# 5) List & Manage Startup Apps (present choices & allow disable)
-function Manage-StartupItems {
-    $name = "Manage Startup Apps"
-    try {
-        $regStartup = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        $commonStartup = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
-
-        $items = @()
-        if (Test-Path $regStartup) {
-            Get-ItemProperty $regStartup -ErrorAction SilentlyContinue | ForEach-Object {
-                $_.PSObject.Properties | Where-Object { $_.Name -notin @("PSPath","PSParentPath","PSChildName","PSDrive","PSProvider") } | ForEach-Object {
-                    $items += [PSCustomObject]@{ Name = $_.Name; Path = $_.Value; Location = "Registry" }
-                }
-            }
-        }
-        if (Test-Path $commonStartup) {
-            Get-ChildItem $commonStartup -File | ForEach-Object {
-                $items += [PSCustomObject]@{ Name = $_.Name; Path = $_.FullName; Location = "Startup Folder" }
-            }
-        }
-
-        if ($items.Count -eq 0) {
-            Write-Host "No startup items found."
-            Log "$name - no startup items found."
-            Notify-Finished $name
-            return
-        }
-
-        Write-Host "`nCurrent Startup Items:"
-        for ($i = 0; $i -lt $items.Count; $i++) {
-            Write-Host "[$i] $($items[$i].Name)  [$($items[$i].Location)]"
-        }
-        $choices = Read-Host "`nEnter numbers (comma-separated) to DISABLE, or 'all' to disable all, or press Enter to skip"
-        if ([string]::IsNullOrWhiteSpace($choices)) {
-            Log "$name - no changes made by user."
-            Notify-Finished $name
-            return
-        }
-        if ($choices.Trim().ToLower() -eq "all") {
-            $toDisable = 0..($items.Count-1)
-        } else {
-            $toDisable = $choices -split ',' | ForEach-Object { $t = $_.Trim(); if ($t -as [int] -ge 0) { $t -as [int] } } | Where-Object { $_ -lt $items.Count }
-        }
-        $backupFile = Join-Path $backupRoot "startup-items-backup-$(Get-Date -Format yyyyMMdd-HHmmss).json"
-        $items | ConvertTo-Json -Depth 3 | Out-File -FilePath $backupFile -Encoding UTF8
-        $restorePlan.backups += @{ type="startup"; file=$backupFile }
-
-        foreach ($idx in $toDisable) {
-            $item = $items[$idx]
-            if ($item.Location -eq "Registry") {
-                Log "Removing startup reg value: $($item.Name)"
-                Remove-ItemProperty -Path $regStartup -Name $item.Name -ErrorAction SilentlyContinue
-            } else {
-                Log "Disabling startup file: $($item.Path)"
-                $disabledFolder = Join-Path $backupRoot "disabled-startup-files"
-                if (-not (Test-Path $disabledFolder)) { New-Item -Path $disabledFolder -ItemType Directory -Force | Out-Null }
-                Move-Item -Path $item.Path -Destination (Join-Path $disabledFolder ($item.Name + "-" + (Get-Date -Format yyyyMMdd-HHmmss))) -Force -ErrorAction SilentlyContinue
-            }
-        }
-        Notify-Finished $name
-    } catch {
-        Log "$name Error: $_"
-        Write-Warning "$name encountered an error."
-    }
-}
-
-# 6) Process Priority Helper: interactive tool to set priority of a running process (temporary)
-function Set-GameProcessPriority {
-    $name = "Set Process Priority (temporary)"
-    try {
-        $processes = Get-Process | Where-Object { $_.ProcessName -ne "Idle" -and $_.ProcessName -ne "System" } | Sort-Object ProcessName
-        if ($processes.Count -eq 0) {
-            Write-Host "No user processes found."
-            Log "$name - no processes found."
-            Notify-Finished $name
-            return
-        }
-        Write-Host "`nRunning processes:"
-        for ($i = 0; $i -lt $processes.Count; $i++) {
-            Write-Host "[$i] $($processes[$i].ProcessName) (PID: $($processes[$i].Id))"
-        }
-        $choice = Read-Host "`nEnter process number to set priority, or press Enter to skip"
-        if ([string]::IsNullOrWhiteSpace($choice)) {
-            Log "$name - no process selected."
-            Notify-Finished $name
-            return
-        }
-        $idx = $choice -as [int]
-        if ($idx -ge 0 -and $idx -lt $processes.Count) {
-            $proc = $processes[$idx]
-            Write-Host "`nPriority options: 1 - Normal, 2 - AboveNormal, 3 - High, 4 - Realtime (USE WITH CAUTION)"
-            $priChoice = Read-Host "Select priority (1-4)"
-            $priority = switch ($priChoice) {
-                "1" { "Normal" }
-                "2" { "AboveNormal" }
-                "3" { "High" }
-                "4" { "Realtime" }
-                default { "Normal" }
-            }
-            try {
-                $proc.PriorityClass = $priority
-                Log "Set priority of $($proc.ProcessName) (PID: $($proc.Id)) to $priority"
-                Write-Host "Priority set to $priority (reverts on reboot/process restart)"
-            } catch {
-                Log "Failed to set priority: $_"
-                Write-Warning "Could not set priority (access denied or process exited)."
-            }
-        }
-        Notify-Finished $name
-    } catch {
-        Log "$name Error: $_"
-        Write-Warning "$name encountered an error."
-    }
-}
-#endregion
-
-#region Apply All & Revert All
-function Apply-AllTweaks {
-    Log "=== Applying All Tweaks ==="
-    $restorePlan.restorePointCreated = Create-RestorePoint
-    Clear-TempFiles
-    Disable-WindowsAnimations
-    Set-HighPerformancePowerPlan
-    Optimize-NetworkBasic
-    Manage-StartupItems
-    Log "=== All Tweaks Applied ==="
-    Write-Host "`n✔️ All tweaks applied." -ForegroundColor Green
-}
-
-function Revert-AllTweaks {
-    Log "=== Reverting All Tweaks ==="
-    Write-Host "Reverting changes... see log for details."
-    # Restore registry files
-    $regBackups = $restorePlan.backups | Where-Object { $_.type -eq "registry" }
-    foreach ($b in $regBackups) {
-        Log "Importing registry backup: $($b.file)"
-        reg import $b.file | Out-Null
-    }
-    # Restore registry values
-    $regVals = $restorePlan.backups | Where-Object { $_.type -eq "regvalue" }
-    foreach ($b in $regVals) {
-        $val = Get-Content $b.file -Raw
-        Log "Restoring registry value: $($b.path) -> $($b.name) = $val"
-        Set-ItemProperty -Path $b.path -Name $b.name -Value $val -Force -ErrorAction SilentlyContinue
-    }
-    # Restore files
-    $fileBackups = $restorePlan.backups | Where-Object { $_.type -eq "files" }
-    foreach ($b in $fileBackups) {
-        Log "Restoring folder: $($b.backup) -> $($b.original)"
-        if (Test-Path $b.original) { Remove-Item $b.original -Recurse -Force -ErrorAction SilentlyContinue }
-        Move-Item -Path $b.backup -Destination $b.original -Force -ErrorAction SilentlyContinue
-    }
-    # Re-enable services
-    $svcBackups = $restorePlan.backups | Where-Object { $_.type -eq "service" }
-    foreach ($b in $svcBackups) {
-        Log "Re-enabling service: $($b.name)"
-        Set-Service -Name $b.name -StartupType Automatic -ErrorAction SilentlyContinue
-        Start-Service -Name $b.name -ErrorAction SilentlyContinue
-    }
-    # Restore power plan
-    $pp = $restorePlan.backups | Where-Object { $_.type -eq "powerplan" }
-    if ($pp) {
-        Log "Restoring power plan GUID: $($pp.guid)"
-        powercfg /setactive $pp.guid | Out-Null
-    }
-    # Restore startup items
-    $su = $restorePlan.backups | Where-Object { $_.type -eq "startup" }
-    if ($su) {
-        $items = Get-Content $su.file -Raw | ConvertFrom-Json
-        foreach ($item in $items) {
-            if ($item.Location -eq "Registry") {
-                Log "Restoring startup reg value: $($item.Name)"
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name $item.Name -Value $item.Path -Force -ErrorAction SilentlyContinue
-            } else {
-                $disabledFolder = Join-Path $backupRoot "disabled-startup-files"
-                $backedFile = Get-ChildItem $disabledFolder -Filter "$($item.Name)*" | Select-Object -First 1
-                if ($backedFile) {
-                    Log "Restoring startup file: $($item.Name)"
-                    Move-Item -Path $backedFile.FullName -Destination $item.Path -Force -ErrorAction SilentlyContinue
-                }
-            }
-        }
-    }
-    # Restore point revert is not automated (user can do via System Restore GUI)
-    Log "=== Revert Finished ==="
-    Write-Host "`n✔️ Revert finished." -ForegroundColor Green
-}
-#endregion
-
-#region Interactive Menu
-function Show-Menu {
-    Clear-Host
-    Write-Host "============================================="
-    Write-Host "    ⭐ Rxborn Tweaking Utility - PowerShell"
-    Write-Host "============================================="
-    Write-Host "[1] Create Restore Point"
-    Write-Host "[2] Temp & Cache Cleanup"
-    Write-Host "[3] Disable Windows Animations"
-    Write-Host "[4] Set High Performance Power Plan"
-    Write-Host "[5] Basic Network Optimizations (flush DNS, pause Delivery Optimization)"
-    Write-Host "[6] Manage Startup Apps (interactive)"
-    Write-Host "[7] Set Process Priority (interactive)"
-    Write-Host "[8] Apply All Tweaks"
-    Write-Host "[9] Revert All Tweaks"
-    Write-Host "[0] Exit"
-    Write-Host "---------------------------------------------"
-    $choice = Read-Host "Choose an option (0-9)"
-    switch ($choice) {
-        "1" { $restorePlan.restorePointCreated = Create-RestorePoint; Pause }
-        "2" { Clear-TempFiles; Pause }
-        "3" { Disable-WindowsAnimations; Pause }
-        "4" { Set-HighPerformancePowerPlan; Pause }
-        "5" { Optimize-NetworkBasic; Pause }
-        "6" { Manage-StartupItems; Pause }
-        "7" { Set-GameProcessPriority; Pause }
-        "8" { Apply-AllTweaks; Pause }
-        "9" { Revert-AllTweaks; Pause }
-        "0" { Write-Host "Exiting..."; exit 0 }
-        default { Write-Host "Invalid choice"; Pause }
-    }
-}
-
-function Pause { Write-Host ""; Read-Host "Press Enter to continue..." }
-#endregion
-
-# Save initial metadata
-$restorePlan | ConvertTo-Json -Depth 10 | Out-File -FilePath $restorePlanFile -Encoding UTF8
-
-# Main loop
-try {
-    while ($true) { Show-Menu }
-}
-catch {
+::===========================================================================
+:REVERTALL
+echo.
+echo === Reverting ALL tweaks ===
+%LOG% Revert-All started
+:: restore registry files (exported keys)
+for %%F in ("%BAK%\*_*.reg") do (
+   echo Importing %%~nxF ...
+   reg import "%%F" >nul 2>nul && %LOG% Imported %%~nxF
+)
+:: restore VisFX value if backed up
+if exist "%BAK%\VisFXSetting.txt" (
+   set /p VFX=<"%BAK%\VisFXSetting.txt"
+   reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d !VFX! /f >nul
+   %LOG% Restored VisFX=!VFX!
+)
+:: restore power plan
+if exist "%BAK%\power-guid.txt" (
+   set /p PG=<"%BAK%\power-guid.txt"
+   powercfg /setactive !PG! && %LOG% Restored power-plan !PG!
+)
+:: re-enable DoSvc
+sc config DoSvc start= auto >nul
+sc start DoSvc >nul && %LOG% Re-enabled DoSvc
+echo.
+echo === Revert finished === & %LOG% Revert-All finished
+%PAUSE%
+goto :MENU
+::===========================================================================
     Write-Host "`nFATAL ERROR: $_" -ForegroundColor Red
 }
 Read-Host "`nPress ENTER to close this window"
