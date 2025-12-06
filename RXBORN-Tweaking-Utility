@@ -283,6 +283,5 @@ function Pause { Write-Host ""; Read-Host "Press Enter to continue..." }
 $restorePlan | ConvertTo-Json -Depth 10 | Out-File -FilePath $restorePlanFile -Encoding UTF8
 
 # Main loop
-while ($true) {
-    Show-Menu
-}
+while ($true) { Show-Menu }
+Read-Host "`nPress ENTER to close this window"
